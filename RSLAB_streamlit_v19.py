@@ -1144,6 +1144,9 @@ def is_transient_widget_state_key(key):
     fixed={
         "uploads","session_upload","graph_palette_upload",
         "apply_session","save_full_session","save_graph_settings",
+        "session_save_filename","session_save_as_name","graph_settings_save_name","session_save_mode",
+        "graph_settings_save_mode",
+        "active_session_filename","active_session_scope",
         "loaded_error_link","loaded_error_unlink","curve_editor_apply","curve_editor_close",
         "select_all_graph_curves","reverse_curve_order","selected_curves_top",
         "selected_curves_up","selected_curves_bottom","selected_curves_down",
@@ -1175,7 +1178,10 @@ def state_json(series, session_state, scope="full"):
     """Save spectra and/or every serializable app setting."""
     data=[{key:json_safe(value) for key,value in item.items()} for item in series]
     excluded={"series","uploads","session_upload","graph_palette_upload",
-              "curve_editor_open","curve_editor_name","curve_editor_error"}
+              "curve_editor_open","curve_editor_name","curve_editor_error",
+              "session_save_filename","session_save_as_name","graph_settings_save_name",
+              "session_save_mode","graph_settings_save_mode",
+              "active_session_filename","active_session_scope"}
     settings={}
     for key,value in session_state.items():
         if key in excluded or str(key).startswith("_") or is_transient_widget_state_key(key):
@@ -1186,6 +1192,14 @@ def state_json(series, session_state, scope="full"):
             continue
     return json.dumps({"format":"rslab-session","version":3,"scope":scope,
                        "series":data,"settings":settings},ensure_ascii=False,allow_nan=False)
+
+def safe_download_stem(value, fallback="rslab_session"):
+    """Return a browser-download filename stem without path or forbidden characters."""
+    stem=Path(str(value or "")).name
+    if stem.lower().endswith(".json"):
+        stem=stem[:-5]
+    stem=re.sub(r'[\\/:*?"<>|]+',"_",stem).strip(" ._")
+    return stem or fallback
 
 def refresh_linked_errors(items):
     """Attach imported error-curve Y values to targets on the target X grid."""
@@ -1289,9 +1303,18 @@ def curve_archive(target_names, series, values_by_name, extension, errors_by_nam
             archive.writestr(filename,content)
     return archive_buffer.getvalue()
 
+pending_session_file=st.session_state.pop("_pending_loaded_session_file",None)
+if pending_session_file:
+    st.session_state["active_session_filename"]=pending_session_file["name"]
+    st.session_state["active_session_scope"]=pending_session_file["scope"]
+    st.session_state["session_save_as_name"]=pending_session_file["name"]+"_copy"
+    st.session_state["graph_settings_save_name"]=pending_session_file["name"]+"_settings"
+    st.session_state["session_save_mode"]="불러온 파일명으로 덮어쓰기"
+    st.session_state["graph_settings_save_mode"]="불러온 파일명으로 덮어쓰기"
 if "series" not in st.session_state: st.session_state.series=[]
 st.session_state.series=make_series_names_unique(st.session_state.series)
 st.session_state.setdefault("fit_results",[])
+st.session_state.setdefault("graph_workspaces",[])
 
 def render_blank_spectrum(prefix):
     """Provide a spreadsheet-like grid for direct cell editing and multi-cell paste."""
@@ -1377,13 +1400,46 @@ with st.sidebar:
         st.session_state["graph_selected"]=[]
         st.session_state["fit_results"]=[]
         st.session_state["graph_visible_fit_ids"]=[]
+    session=st.file_uploader("세션 불러오기 (.json)",type="json",key="session_upload")
+    active_session_name=st.session_state.get("active_session_filename")
+    active_session_scope=st.session_state.get("active_session_scope")
     st.caption("세션은 데이터와 그래프 설정을 함께 저장하거나, 그래프 설정만 따로 저장할 수 있습니다.")
+    if active_session_name and active_session_scope=="full":
+        save_action=st.radio("세션 저장 방식",["불러온 파일명으로 덮어쓰기","다른 이름으로 저장"],
+                             horizontal=True,key="session_save_mode")
+        if save_action=="불러온 파일명으로 덮어쓰기":
+            full_session_stem=active_session_name
+            st.caption(f"저장 파일명: {full_session_stem}.json")
+            st.caption("브라우저 보안상 파일을 자동으로 교체할 수는 없습니다. 저장 창이 뜨면 기존 파일을 선택해 교체하세요.")
+        else:
+            full_session_stem=safe_download_stem(
+                st.text_input("새 파일명 (확장자 제외)",key="session_save_as_name",placeholder="파일명을 입력하세요"),
+                active_session_name+"_copy")
+    else:
+        st.session_state.setdefault("session_save_filename",active_session_name or "rslab_session")
+        full_session_stem=safe_download_stem(
+            st.text_input("데이터 + 그래프 설정 파일명 (확장자 제외)",key="session_save_filename"),"rslab_session")
     if st.session_state.series:
         st.download_button("데이터 + 그래프 설정 저장",state_json(st.session_state.series,st.session_state,"full"),
-                           "rslab_session.json","application/json",use_container_width=True,key="save_full_session")
+                           f"{full_session_stem}.json","application/json",use_container_width=True,key="save_full_session")
+    if active_session_name and active_session_scope=="settings":
+        settings_action=st.radio("그래프 설정 저장 방식",["불러온 파일명으로 덮어쓰기","다른 이름으로 저장"],
+                                 horizontal=True,key="graph_settings_save_mode")
+        if settings_action=="불러온 파일명으로 덮어쓰기":
+            graph_settings_stem=active_session_name
+            st.caption("브라우저 보안상 파일을 자동으로 교체할 수는 없습니다. 저장 창이 뜨면 기존 파일을 선택해 교체하세요.")
+        else:
+            st.session_state.setdefault("graph_settings_save_name",active_session_name+"_copy")
+            graph_settings_stem=safe_download_stem(
+                st.text_input("새 그래프 설정 파일명 (확장자 제외)",key="graph_settings_save_name"),
+                active_session_name+"_copy")
+    else:
+        st.session_state.setdefault("graph_settings_save_name","rslab_graph_settings")
+        graph_settings_stem=safe_download_stem(
+            st.text_input("그래프 설정 파일명 (확장자 제외)",key="graph_settings_save_name"),
+            "rslab_graph_settings")
     st.download_button("그래프 설정만 저장",state_json([],st.session_state,"settings"),
-                       "rslab_graph_settings.json","application/json",use_container_width=True,key="save_graph_settings")
-    session=st.file_uploader("세션 불러오기 (.json)",type="json",key="session_upload")
+                       f"{graph_settings_stem}.json","application/json",use_container_width=True,key="save_graph_settings")
     if session and st.button("세션 적용",key="apply_session"):
         try:
             payload=json.loads(session.getvalue().decode("utf-8"))
@@ -1399,6 +1455,7 @@ with st.sidebar:
                 raise ValueError("RSLAB 세션 파일 형식이 올바르지 않습니다.")
             if scope not in {"full","settings"}:
                 raise ValueError("세션 파일의 저장 범위를 인식할 수 없습니다.")
+            loaded_stem=safe_download_stem(Path(session.name).stem)
             if scope=="full":
                 restored=[]
                 for item in raw_series:
@@ -1422,6 +1479,7 @@ with st.sidebar:
                 st.session_state["graph_visible_fit_ids"]=[]
             st.session_state["session_load_message"]=("그래프 설정을 적용했습니다. 현재 데이터는 유지했습니다."
                                                        if scope=="settings" else "세션을 적용했습니다.")
+            st.session_state["_pending_loaded_session_file"]={"name":loaded_stem,"scope":scope}
             st.rerun()
         except Exception as error:
             st.error(f"세션 파일을 적용하지 못했습니다: {error}")
@@ -2430,6 +2488,172 @@ with tabs[0]:
             components.html(preview_html,width=canvas_width_px+26,height=canvas_height_px+26,scrolling=False)
             st.caption("그래프 위에 마우스를 올리면 십자선의 X/Y 좌표와 가까운 곡선의 이름 및 실제 데이터 X/Y 값이 표시됩니다.")
             st.caption(f"캔버스 {canvas_width_px} × {canvas_height_px} px · 플롯 박스 {plot_box_width} × {plot_box_height} px · 곡선 {len(series)}개")
+
+    st.divider()
+    workspace_col,workspace_help_col=st.columns([1,4])
+    if workspace_col.button("＋ 그래프 작업공간 추가",key="add_graph_workspace"):
+        workspaces=st.session_state.get("graph_workspaces",[])
+        next_id=max([int(item.get("id",0)) for item in workspaces]+[0])+1
+        workspaces.append({"id":next_id,"name":f"그래프 {next_id+1}"})
+        st.session_state["graph_workspaces"]=workspaces
+        st.rerun()
+    workspace_help_col.caption("추가 그래프마다 곡선 선택, 그래프 형식, 제목·축 이름, 축 범위, 색상과 굵기를 따로 설정할 수 있습니다. 데이터 전처리와 캔버스·글꼴 설정은 기본 그래프와 공유합니다.")
+    graph_workspaces=st.session_state.get("graph_workspaces",[])
+    if graph_workspaces:
+        workspace_tabs=st.tabs([item.get("name",f"그래프 {item['id']+1}") for item in graph_workspaces])
+        for workspace,workspace_tab in zip(graph_workspaces,workspace_tabs):
+            wid=int(workspace["id"])
+            prefix=f"graph_workspace_{wid}"
+            with workspace_tab:
+                top_cols=st.columns([5,1])
+                ws_title_key=f"{prefix}_title"
+                ws_xlab_key=f"{prefix}_xlabel"
+                ws_ylab_key=f"{prefix}_ylabel"
+                st.session_state.setdefault(ws_title_key,"")
+                ws_title=top_cols[0].text_input("그래프 제목",key=ws_title_key,placeholder="이 그래프의 제목")
+                if top_cols[1].button("작업공간 삭제",key=f"{prefix}_delete",use_container_width=True):
+                    st.session_state["graph_workspaces"]=[item for item in graph_workspaces if int(item.get("id",0))!=wid]
+                    st.rerun()
+                ws_curve_key=f"{prefix}_curves"
+                st.session_state.setdefault(ws_curve_key,[name for name in plot_names if name in plot_selected])
+                ws_curves=st.multiselect("이 그래프에 그릴 곡선",plot_names,key=ws_curve_key,
+                                         format_func=selection_label,placeholder="곡선을 선택하세요")
+                if not ws_curves:
+                    st.info("이 작업공간에 표시할 곡선을 선택하세요.")
+                    continue
+                ws_axis_default=next((item for item in series if item["name"]==ws_curves[0]),{})
+                ws_label_cols=st.columns(2)
+                st.session_state.setdefault(ws_xlab_key,str(ws_axis_default.get("x_label",xlab)))
+                st.session_state.setdefault(ws_ylab_key,str(ws_axis_default.get("y_label",ylab)))
+                ws_xlabel=ws_label_cols[0].text_input("X축 이름",key=ws_xlab_key)
+                ws_ylabel=ws_label_cols[1].text_input("Y축 이름",key=ws_ylab_key)
+                ws_setting_cols=st.columns(3)
+                ws_style_key=f"{prefix}_plot_style"
+                ws_style_options=["라인 플롯","산점도","산점도 + 라인 플롯","막대그래프"]
+                st.session_state.setdefault(ws_style_key,plot_style)
+                ws_plot_style=ws_setting_cols[0].selectbox("플롯 형식",ws_style_options,key=ws_style_key)
+                ws_categorical_key=f"{prefix}_categorical_x"
+                st.session_state.setdefault(ws_categorical_key,categorical_x)
+                ws_categorical=ws_setting_cols[1].checkbox("X값 동일 간격",key=ws_categorical_key)
+                ws_bar_layout="겹쳐서"
+                if ws_plot_style=="막대그래프":
+                    ws_bar_layout=ws_setting_cols[2].selectbox("막대 배치",["겹쳐서","나란히"],key=f"{prefix}_bar_layout")
+                elif ws_plot_style in ("산점도","산점도 + 라인 플롯"):
+                    ws_marker_options={"꽉 찬 원":("o",True),"안 찬 원":("o",False),
+                                       "꽉 찬 네모":("s",True),"안 찬 네모":("s",False),
+                                       "꽉 찬 삼각형":("^",True),"안 찬 삼각형":("^",False),
+                                       "꽉 찬 마름모":("D",True),"안 찬 마름모":("D",False)}
+                    ws_marker_label=ws_setting_cols[2].selectbox("점 모양",list(ws_marker_options),key=f"{prefix}_marker")
+                    ws_marker=ws_marker_options[ws_marker_label]
+                else:
+                    ws_marker=("o",True)
+
+                ws_style_values={}
+                with st.expander("이 그래프의 곡선 색상 및 굵기",expanded=False):
+                    for curve_index,curve_name in enumerate(ws_curves):
+                        global_index=names.index(curve_name)
+                        default_color=style[curve_name]["color"]
+                        curve_cols=st.columns([2,1,1])
+                        curve_cols[0].markdown(f"**{curve_name}**")
+                        ws_color=curve_cols[1].color_picker("선 색상",value=st.session_state.get(
+                            f"{prefix}_color_{global_index}",default_color),key=f"{prefix}_color_{global_index}")
+                        ws_width=curve_cols[2].number_input("선 굵기",min_value=0.1,max_value=10.0,
+                            value=float(st.session_state.get(f"{prefix}_width_{global_index}",style[curve_name]["linewidth"])),
+                            step=0.1,key=f"{prefix}_width_{global_index}")
+                        ws_fill=ws_color
+                        ws_edge="#333333"
+                        ws_edge_width=0.8
+                        if ws_plot_style=="막대그래프":
+                            fill_col,edge_col,edge_width_col=st.columns([1,1,1])
+                            ws_fill=fill_col.color_picker("막대 채우기",value=st.session_state.get(
+                                f"{prefix}_bar_fill_{global_index}",ws_color),key=f"{prefix}_bar_fill_{global_index}")
+                            ws_edge=edge_col.color_picker("막대 테두리",value=st.session_state.get(
+                                f"{prefix}_bar_edge_{global_index}","#333333"),key=f"{prefix}_bar_edge_{global_index}")
+                            ws_edge_width=edge_width_col.number_input("테두리 두께",min_value=0.0,max_value=5.0,
+                                value=float(st.session_state.get(f"{prefix}_bar_edge_width_{global_index}",0.8)),
+                                step=0.1,key=f"{prefix}_bar_edge_width_{global_index}")
+                        ws_style_values[curve_name]={"color":ws_color,"linewidth":ws_width,
+                            "bar_color":ws_fill,"bar_edgecolor":ws_edge,"bar_edgewidth":ws_edge_width}
+
+                ws_data=[item for item in series if item["name"] in ws_curves]
+                ws_x_arrays=[np.asarray(item["x"],dtype=float) for item in ws_data]
+                ws_x_all=np.concatenate(ws_x_arrays)
+                ws_x_all=ws_x_all[np.isfinite(ws_x_all)]
+                ws_y_arrays=[np.asarray(proc[item["name"]],dtype=float) for item in ws_data]
+                ws_y_all=np.concatenate(ws_y_arrays)
+                ws_y_all=ws_y_all[np.isfinite(ws_y_all)]
+                if not ws_x_all.size or not ws_y_all.size:
+                    st.warning("선택한 곡선에 표시할 유효 데이터가 없습니다.")
+                    continue
+                ws_auto_x=st.checkbox("X축 자동 범위",value=True,key=f"{prefix}_x_auto")
+                ws_auto_y=st.checkbox("Y축 자동 범위",value=True,key=f"{prefix}_y_auto")
+                ws_log_cols=st.columns(2)
+                ws_xlog=ws_log_cols[0].checkbox("X축 로그",value=False,disabled=ws_categorical,key=f"{prefix}_x_log")
+                ws_ylog=ws_log_cols[1].checkbox("Y축 로그",value=False,key=f"{prefix}_y_log")
+                ws_x_range=ws_x_all[ws_x_all>0] if ws_xlog else ws_x_all
+                ws_y_range=ws_y_all[ws_y_all>0] if ws_ylog else ws_y_all
+                if not ws_x_range.size or not ws_y_range.size:
+                    st.warning("로그 축에 사용할 양수 데이터가 없습니다.")
+                    continue
+                ws_x_default=(float(np.min(ws_x_range)),float(np.max(ws_x_range)))
+                ws_y_default=(float(np.min(ws_y_range)),float(np.max(ws_y_range)))
+                ws_range_cols=st.columns(4)
+                ws_xmin=ws_range_cols[0].number_input("X 최소",value=ws_x_default[0],disabled=ws_auto_x,
+                                                       key=f"{prefix}_xmin",format="%.6g")
+                ws_xmax=ws_range_cols[1].number_input("X 최대",value=ws_x_default[1],disabled=ws_auto_x,
+                                                       key=f"{prefix}_xmax",format="%.6g")
+                ws_ymin=ws_range_cols[2].number_input("Y 최소",value=ws_y_default[0],disabled=ws_auto_y,
+                                                       key=f"{prefix}_ymin",format="%.6g")
+                ws_ymax=ws_range_cols[3].number_input("Y 최대",value=ws_y_default[1],disabled=ws_auto_y,
+                                                       key=f"{prefix}_ymax",format="%.6g")
+                ws_grid=st.checkbox("격자 표시",value=False,key=f"{prefix}_grid")
+                ws_legend=st.checkbox("범례 표시",value=True,key=f"{prefix}_legend")
+                ws_xmin,ws_xmax=(ws_x_default if ws_auto_x or ws_xmin>=ws_xmax else (ws_xmin,ws_xmax))
+                ws_ymin,ws_ymax=(ws_y_default if ws_auto_y or ws_ymin>=ws_ymax else (ws_ymin,ws_ymax))
+                ws_plot_names=[name for name in plot_names if name in ws_curves]
+                ws_category_map,ws_ticks,ws_tick_labels,ws_category_limits=(
+                    categorical_x_layout(series,ws_plot_names,ws_xmin,ws_xmax) if ws_categorical else ({},{},[],None))
+                ws_fig,ws_ax=make_plot(plot_width,plot_height,size_mode,plot_margins,100)
+                if transparent_bg:
+                    ws_fig.patch.set_alpha(0)
+                    ws_ax.patch.set_alpha(0)
+                apply_graph_frame(ws_ax,show_graph_frame,graph_frame_width)
+                for ws_index,curve_name in enumerate(ws_plot_names):
+                    ws_curve=next(item for item in series if item["name"]==curve_name)
+                    ws_x=(categorical_curve_x(ws_curve,ws_category_map) if ws_categorical else ws_curve["x"])
+                    ws_curve_for_plot={**ws_curve,"x":ws_x}
+                    ws_error=processed_error(ws_curve,opts)
+                    chosen_style=ws_style_values[curve_name]
+                    draw_curve(ws_ax,ws_curve_for_plot,proc[curve_name],curve_name,chosen_style["color"],
+                               chosen_style["linewidth"],ws_plot_style,ws_error,
+                               ws_marker if ws_plot_style in ("산점도","산점도 + 라인 플롯") else ("o",True),
+                               error_capsize,error_capthick,error_linewidth,ws_bar_layout,ws_index,
+                               len(ws_plot_names),chosen_style["bar_color"],chosen_style["bar_edgecolor"],
+                               chosen_style["bar_edgewidth"])
+                if ws_xlog and not ws_categorical:
+                    ws_ax.set_xscale("log")
+                if ws_ylog:
+                    ws_ax.set_yscale("log")
+                if ws_categorical:
+                    ws_ax.set_xlim(*ws_category_limits)
+                    ws_ax.set_xticks(ws_ticks,ws_tick_labels)
+                else:
+                    ws_ax.set_xlim(ws_xmin,ws_xmax)
+                ws_ax.set_ylim(ws_ymin,ws_ymax)
+                ws_ax.set_xlabel(format_axis_label(ws_xlabel),fontsize=axis_label_size,color=axis_text_color)
+                ws_ax.set_ylabel(format_axis_label(ws_ylabel),fontsize=axis_label_size,color=axis_text_color)
+                ws_ax.set_title(ws_title or None,fontsize=title_font_size,color=axis_text_color,pad=graph_title_pad)
+                ws_ax.tick_params(axis="both",labelsize=tick_font_size,labelcolor=axis_text_color)
+                if ws_grid:
+                    ws_ax.grid(True,alpha=.3)
+                if ws_legend:
+                    ws_ax.legend(fontsize=legend_font_size,loc=legend_loc)
+                ws_png=render_png_fixed_size(ws_fig,canvas_width_px,canvas_height_px,preview_dpi,
+                                             transparent=transparent_bg)
+                plt.close(ws_fig)
+                st.image(ws_png,width=canvas_width_px)
+                st.download_button("이 그래프 PNG 저장",ws_png,f"graph_{wid+1}.png","image/png",
+                                   key=f"{prefix}_download_png")
 
 with tabs[1]:
     st.subheader("선택 곡선 평균")
