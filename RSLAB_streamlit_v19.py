@@ -8,7 +8,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 import matplotlib.pyplot as plt
 import plotly.express as px
-import plotly.graph_objects as go
+import plotly.graph_objects as gosdfgsdfgsdfgsdfg
 from PIL import Image
 from matplotlib.colors import to_hex, to_rgb
 from matplotlib import font_manager
